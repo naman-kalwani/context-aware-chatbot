@@ -1,0 +1,17 @@
+[project]
+name = "memory-chatbot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.128.0",
+  "dotenv>=0.9.9",
+  "langchain-neo4j>=0.8.0",
+  "langchain-openai>=1.1.7",
+  "langchain-qdrant>=1.1.0",
+  "mem0ai>=1.0.2",
+  "openai>=2.15.0",
+  "rank-bm25>=0.2.2",
+  "uvicorn>=0.40.0",
+]
