@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 
 load_dotenv()
 
+# configuration for memory client
 config = {
     "embedder": {
         "provider": "openai",
@@ -41,6 +42,71 @@ config = {
 mem_client = Memory.from_config(config)
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# short-term memory 
+stm = []
+# rolling summary
+mtm = ''
+
+# llm to create rolling summary
+async def rolling_summary():
+    
+    global stm, mtm
+    
+    if(len(stm) < 5):
+        return
+    
+    contents = "\n\n\n".join([f'user : {m.get("user")} assistant : {m.get("assistant")}'  for m in stm])  
+    SYSTEM_PROMPT = f'''
+        you are a chat summarizer
+        summarize the conversations between user and assistant so far for future interactions
+        
+        Rules: 
+        - Preserve user goals and intent
+        - Preserve decisions and constraints
+        - Preserve unresolved questions
+        - Remove examples and repetition
+        - Be concise and factual
+    '''
+    
+    messages = [
+        {"role" : "system" , "content" : SYSTEM_PROMPT},
+        {"role" : "user" , "content" : contents}
+    ]
+    
+    response = await client.responses.create(
+        model = "gpt-5-mini",
+        input = messages
+    )
+    
+    summary = response.output_text.strip()
+    stm.clear()  # remove old entries
+    mtm = summary
+
+# rule-based nlp gate
+async def nlp_gate(text):
+    text = text.lower()
+    triggers = [
+        "my", "i am", "i'm", "i work", "i study", "i live",
+        "my goal", "my project", "my name", "my company",
+        "i like", "i love", "i hate"
+    ]
+    return any(t in text for t in triggers)
+
+#  llm to decide if memory needs to be stored
+async def memory_gate(user, assistant):
+    prompt = f"""
+    Decide if this conversation contains long-term user info.
+    Reply only YES or NO.
+
+    User: {user}
+    Assistant: {assistant}
+    """
+    r = await client.responses.create(
+        model="gpt-5-mini",
+        input=prompt
+    )
+    return r.output_text.strip() == "YES"
+
 # llm to extract memory from the response
 async def extract_memory(user : str, assistant: str) -> str:
     prompt = f"""
@@ -62,57 +128,97 @@ async def extract_memory(user : str, assistant: str) -> str:
     text = res.output_text.strip()
     return None if text == "NONE" else text
 
+# async function to store memory
 async def store_memory_async(user, assistant, user_id="P101"):
     try:
+        # nlp gate to filter out unnecessary memories
+        if not await nlp_gate(user + " " + assistant):
+            return
+        
+        # llm gate to decide if memory needs to be stored
+        should_store = await memory_gate(user, assistant)
+        if not should_store:
+            return
+        
+        # extract memory
         memory = await extract_memory(user, assistant)
         if memory:
             mem_client.add(memory, user_id=user_id)
+            
     except Exception as e:
         print(f"[ Async Memory Error]: {e}")
 
-# main chat function
-async def chat(message : str, user_id : str = "P101") -> str:
-    
-    loop = asyncio.get_running_loop()
-    mem_result = await loop.run_in_executor(
-        None,
-        lambda: mem_client.search(message, user_id=user_id)
+
+async def get_memories(message : str, user_id : str = "P101"):
+    try:
+        loop = asyncio.get_running_loop()
+        mem_result = await loop.run_in_executor(
+            None,
+            lambda: mem_client.search(message, user_id=user_id)
+        )
+        memories = [m["memory"] for m in mem_result.get('results', [])]
+        return memories
+    except Exception as e:
+        print(f"[ Get Memories Error]: {e}")
+        return []   
+
+async def chat(message: str, user_id: str = "P101"):
+
+    memories_task = asyncio.create_task(get_memories(message, user_id))
+
+    SYSTEM_PROMPT = """
+    You are an AI assistant that provides accurate and concise information.
+    Use provided memories if they are helpful.
+    """
+    recent_chats = "\n\n".join(
+        [f"User: {m['user']}\nAssistant: {m['assistant']}" for m in stm]
     )
-    
-    memories = [m["memory"] for m in mem_result.get('results', [])]
+
+    memories = await memories_task
+
     context = "\n- ".join(memories) if memories else "None"
-    # print(f"Context used: {context}")
-    
-    SYSTEM_PROMPT = f"""
-        -You are an AI assistant that provides accurate and concise information based on user queries 
-    """
+
+    # Build final prompt
     USER_PROMPT = f"""
-        Query : {message}  
-        Context : {context}   
+    Query: {message}
+    Rolling Summary: {mtm}
+    Recent chats: {recent_chats}
+    Context: {context}
     """
+
     messages = [
-        {'role' : 'system' , 'content' : SYSTEM_PROMPT},
-        {"role" : "user" , "content" : USER_PROMPT}
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": USER_PROMPT}
     ]
-    response = await client.responses.create(
+
+    # Start streaming response
+    full_answer = ""
+
+    async with client.responses.stream(
         model="gpt-5-mini",
         input=messages
-    )
-    messages.append(
-        {"role" : "assistant" , "content" : response.output_text}
-    )
-    
-    # we are calling another LLM to extract memory from the response
-    asyncio.create_task(
-        store_memory_async(message, response.output_text, user_id=user_id)
-    )
-    
-    return response.output_text
+    ) as stream:
+
+        async for event in stream:
+            if event.type == "response.output_text.delta":
+                token = event.delta
+                full_answer += token
+                yield token  
+
+    # Update short-term memory
+    stm.append({"user": message, "assistant": full_answer})
+
+    # Background jobs (do NOT block user)
+    asyncio.create_task(rolling_summary())
+    asyncio.create_task(store_memory_async(message, full_answer, user_id))
+
 
 # async def main():
 #     while True:
 #         message = input(">> ")
-#         print(await chat(message))
+#         async for token in chat(message):
+#             print(token, end="", flush=True)
+#         print()
 
 # if __name__ == "__main__":
 #     asyncio.run(main())

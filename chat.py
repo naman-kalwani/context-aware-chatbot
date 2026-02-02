@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from main import chat
 
@@ -16,6 +17,12 @@ async def read_root():
   return {"message": "Welcome to the Memory Chatbot API"}
 
 @app.post("/chat/" , response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):  
-  response_text = await chat(request.message , request.user_id)
-  return ChatResponse(response=response_text)
+async def chat_endpoint(request: ChatRequest):
+  async def token_generator():
+    async for token in chat(request.message, request.user_id):
+      yield token
+
+  return StreamingResponse(
+    token_generator(),
+    media_type="text/plain"
+  )
