@@ -82,30 +82,28 @@ async def rolling_summary():
     stm.clear()  # remove old entries
     mtm = summary
 
-# rule-based nlp gate
-async def nlp_gate(text):
-    text = text.lower()
-    triggers = [
-        "my", "i am", "i'm", "i work", "i study", "i live",
-        "my goal", "my project", "my name", "my company",
-        "i like", "i love", "i hate"
-    ]
-    return any(t in text for t in triggers)
-
 #  llm to decide if memory needs to be stored
-async def memory_gate(user, assistant):
+async def memory_gate(user):
     prompt = f"""
     Decide if this conversation contains long-term user info.
+    Reply YES if the user reveals:
+    - name
+    - role
+    - preference
+    - project
+    - goal
+    - background
     Reply only YES or NO.
 
     User: {user}
-    Assistant: {assistant}
     """
     r = await client.responses.create(
         model="gpt-5-mini",
         input=prompt
     )
-    return r.output_text.strip() == "YES"
+    decision = r.output_text.strip().upper()
+    print("[MEMORY GATE]:", decision)
+    return "YES" in decision
 
 # llm to extract memory from the response
 async def extract_memory(user : str, assistant: str) -> str:
@@ -131,15 +129,6 @@ async def extract_memory(user : str, assistant: str) -> str:
 # async function to store memory
 async def store_memory_async(user, assistant, user_id="P101"):
     try:
-        # nlp gate to filter out unnecessary memories
-        if not await nlp_gate(user + " " + assistant):
-            return
-        
-        # llm gate to decide if memory needs to be stored
-        should_store = await memory_gate(user, assistant)
-        if not should_store:
-            return
-        
         # extract memory
         memory = await extract_memory(user, assistant)
         if memory:
@@ -207,18 +196,21 @@ async def chat(message: str, user_id: str = "P101"):
 
     # Update short-term memory
     stm.append({"user": message, "assistant": full_answer})
+    print(f"[STM Updated] Total Entries: {len(stm)}")
+    print(f"mtm: {mtm}")
 
     # Background jobs (do NOT block user)
     asyncio.create_task(rolling_summary())
     asyncio.create_task(store_memory_async(message, full_answer, user_id))
 
 
-# async def main():
-#     while True:
-#         message = input(">> ")
-#         async for token in chat(message):
-#             print(token, end="", flush=True)
-#         print()
+async def main():
 
-# if __name__ == "__main__":
-#     asyncio.run(main())
+    while True:
+        message = input(">> ")
+        async for token in chat(message):
+            print(token, end="", flush=True)
+        print()
+
+if __name__ == "__main__":
+    asyncio.run(main())
